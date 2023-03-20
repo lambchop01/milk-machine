@@ -1,0 +1,289 @@
+substitutions:
+  device_name: milk-machine
+  friendly_name: Milk Machine
+  ip_address: 192.168.10.217
+  
+
+esphome:
+  name: "${device_name}"
+  on_boot:
+    priority: 100
+    then:
+      - switch.turn_on: master  #turns on mix automation at boot
+      - sensor.template.publish:  # restores milk made value
+          id: milk_made
+          state: !lambda 'return (id(times_mixed)*300);'
+
+
+esp8266:
+  board: nodemcuv2
+
+wifi:
+  networks:
+  - ssid: "Lamb house 2"
+    password: ""
+  manual_ip:
+    # Set this to the IP of the ESP
+    static_ip: "${ip_address}"
+    # Set this to the IP address of the router. Often ends with .1
+    gateway: 192.168.10.1
+    # The subnet of the network. 255.255.255.0 works for most home networks.
+    subnet: 255.255.255.0
+
+  ap:
+    ssid: "${friendly_name} Fallback Hotspot"
+    password: qwertyui
+
+captive_portal:
+
+
+# Enable logging
+logger:
+#  level: DEBUG
+
+# Enable Home Assistant API
+api:
+
+ota:
+
+##pins used
+#         Sensor    Controler
+#D3 sda   blue      red
+#D4 scl   yellow    yellow
+
+#D5 water  R1  water heater
+#D6 blender R2 blender 
+#D0 powder R3  Powder
+#D1 blender heater R4 Water
+#D2 water heater R single Blender heater
+#D7 Dallas Temp Sensor  blender: black flag
+#                       water tank: blank
+
+
+# todo
+#  last mix time
+#  setable min water temp
+
+web_server:
+  port: 80
+
+i2c:
+  sda: D3
+  scl: D4
+
+dallas:
+  update_interval: 5s
+  pin: 
+    number: D7
+    mode:
+      input: True
+      pullup: True
+
+climate:
+  - platform: bang_bang
+    name: "Blender Thermostat"
+    sensor: blendertemp
+    default_target_temperature_low: 25 °C
+    default_target_temperature_high: 28 °C
+    heat_action:
+      - switch.turn_on: blenderheater
+    idle_action:
+      - switch.turn_off: blenderheater
+
+  - platform: bang_bang
+    name: "Water Tank Thermostat"
+    sensor: watertemp
+    default_target_temperature_low: 38 °C
+    default_target_temperature_high: 40 °C
+    heat_action:
+      - switch.turn_on: waterheater
+    idle_action:
+      - switch.turn_off: waterheater
+
+
+switch:
+  - platform: gpio
+    pin:
+      number: D5
+      inverted: true
+    name: "Water Heater"
+    id: waterheater
+    restore_mode: ALWAYS_OFF
+    
+  - platform: gpio
+    pin:
+      number: D6
+      inverted: true
+    name: "Blender Switch"
+    id: blender
+    restore_mode: ALWAYS_OFF
+
+  - platform: gpio
+    pin:
+      number: D0
+      inverted: true
+    name: "Powder Switch"
+    id: powder
+    restore_mode: ALWAYS_OFF
+
+  - platform: gpio
+    pin:
+      number: D1
+      inverted: true
+    name: "Water"
+    id: water
+    restore_mode: ALWAYS_OFF
+
+  - platform: gpio
+    pin: D2
+    name: "Blender Heater"
+    id: blenderheater
+    restore_mode: ALWAYS_OFF
+
+  - platform: template
+    name: "Main Power"
+    id: master
+    optimistic: true
+    restore_mode: ALWAYS_ON
+
+text_sensor:
+  - platform: version
+    name: "${friendly_name} ESPHome Version"
+
+sensor:
+  - platform: wifi_signal
+    name: "${friendly_name} WiFi signal"
+    update_interval: 60s
+
+  - platform: uptime
+    name: "${friendly_name} Uptime"
+    update_interval: 60s
+    on_raw_value:
+      then:
+        - lambda: 'id(min_since_mix) += 1;'
+        - if:
+            condition:
+              lambda: |-
+                if (id(min_since_mix) > 20) {
+                  return true;
+                } else {
+                  return false;
+                }
+            then:
+              - script.execute: blend
+            
+
+  - platform: template
+    name: Milk Made
+    id: milk_made
+    unit_of_measurement: 'mL'
+
+  - platform: dallas
+    address: 0x0054607d87e5ff28 #black flag
+    name: "Blender Temperature"
+    id: blendertemp
+
+  - platform: dallas
+    address: 0x18bc207c7c72ff28
+    name: "Water Temperature"
+    id: watertemp
+
+  - platform: vl53l0x
+    address: 0x29
+    long_range: true
+    name: "Blender Level"
+    update_interval: 5s
+    id: blender_level
+    unit_of_measurement: "in"
+    filters:
+    - median:
+        window_size: 5
+        send_every: 3
+        send_first_at: 1
+    #                 ((total depth*unit conversion) - (x*unit conversion))
+    - lambda: return ((0.300*39.37)-(x*39.37));
+    
+    # trigger on less than 2" of milk in the blender
+    on_value_range:
+      - below: 1.5
+        then:
+          - script.execute: mix_milk   
+
+button:
+  - platform: template
+    name: "Mix Milk"
+    on_press:
+      - script.execute: mix_milk
+
+
+  - platform: restart
+    name: "Milk Machine Restart"
+
+number:
+  - platform: template
+    name: "Min Water Temp"
+    optimistic: true
+    restore_value: true
+    min_value: 0
+    max_value: 50
+    initial_value: 30
+    step: 0.5
+    id: min_water_temp
+
+
+globals:
+   - id: times_mixed
+     type: int
+     initial_value: '0'
+     restore_value: true
+
+   - id: min_since_mix
+     type: int
+     initial_value: '0'
+
+
+script:
+  - id: mix_milk
+    then:
+      - if:
+          condition:
+            or:
+              - switch.is_off: master
+              - lambda: 'return float(id(watertemp).state) < 30;'
+          then:
+            - script.stop: mix_milk
+      - script.stop: blend
+      - script.execute: waterscript
+      - switch.turn_on: blender
+      - delay: 3s  # delay powder on
+      - script.execute: powderscript
+      - lambda: 'id(times_mixed) += 1;'
+      - sensor.template.publish:
+          id: milk_made
+          #                                   * mL mixed at a time
+          state: !lambda 'return (id(times_mixed)*300);'
+      - delay: 15s  # delay for blender off
+      - switch.turn_off: blender
+
+  - id: powderscript
+    then:
+      - switch.turn_on: powder
+      - delay: 3s  #powder on time
+      - switch.turn_off: powder
+
+  - id: waterscript
+    then:
+      - switch.turn_on: water
+      - delay: 5s    #water on time
+      - switch.turn_off: water
+
+  - id: blend
+    then:
+      - switch.turn_on: blender
+      - switch.turn_on: master
+        #blender runs for x
+      - delay: 10s
+      - switch.turn_off: blender
+      - globals.set:
+          id: min_since_mix
+          value: '0.0'
