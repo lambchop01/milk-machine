@@ -249,7 +249,7 @@ script:
           condition:
             or:
               - switch.is_off: master
-              - lambda: 'return float(id(watertemp).state) < 30;'
+              - lambda: 'return float(id(watertemp).state) < float(id(min_water_temp).state);'
           then:
             - script.stop: mix_milk
       - script.stop: blend
